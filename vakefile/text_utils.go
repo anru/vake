@@ -2,9 +2,10 @@ package vakefile
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
-func isBreakWordRune(r rune) bool {
+func isBreakIdentifierRune(r rune) bool {
 	switch {
 	case r >= 'a' && r <= 'z':
 		return false
@@ -16,6 +17,23 @@ func isBreakWordRune(r rune) bool {
 	return true
 }
 
-func isWhiteSpace(r rune) bool {
-	return strings.ContainsRune(" \t\r\n", r)
+const allowedPatternChars = "/*%.:-"
+
+func isBreakPatternRune(r rune) bool {
+	switch {
+	case !isBreakIdentifierRune(r):
+		return false
+	case strings.ContainsRune(allowedPatternChars, r):
+		return false
+	}
+	return true
+}
+
+const validFlags = "foObBedg%"
+
+func isValidFlag(r rune) bool {
+	if r > utf8.RuneSelf {
+		return false
+	}
+	return strings.ContainsRune(validFlags, r)
 }
