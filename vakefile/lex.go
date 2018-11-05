@@ -4,19 +4,25 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/thoas/go-funk"
 )
 
+// Pos is current position in input
 type Pos int
 type tokenType int
 type lexResult uint8
 
 const hSpace = " \t"
 const vSpace = "\r\n"
+const anySpace = hSpace + vSpace
 
 const (
 	lexError lexResult = iota
 	lexOk
 	lexPass
+	lexBreakStart
+	lexBreakLabelBody
 )
 
 const (
@@ -26,9 +32,12 @@ const (
 	tokenMacro
 	tokenVariable
 	tokenAtVariable
+	tokenColon
+	tokenComma
 	// keywords
-	tokenKeyword
+	tokenKeywordStart
 	tokenKeywordForeach
+	tokenKeywordIfeq
 	tokenKeywordIfdef
 	tokenKeywordIfndef
 	tokenKeywordElse
@@ -38,14 +47,20 @@ const (
 	tokenKeywordEnd
 	//
 	tokenAssign
+	tokenPlusAssign
 	tokenString
+	tokenComment
+	tokenShebang
 	tokenPathPattern
 	tokenQuotedString
 	tokenPercentFlag
+	tokenLabel
+	tokenIdentifier
 )
 
 var keywords = map[string]tokenType{
 	"foreach":       tokenKeywordForeach,
+	"ifeq":          tokenKeywordIfeq,
 	"ifdef":         tokenKeywordIfdef,
 	"ifndef":        tokenKeywordIfndef,
 	"else":          tokenKeywordElse,
@@ -158,28 +173,25 @@ func (l *lexer) backup() lexResult {
 }
 
 // emit passes an item back to the client.
-func (l *lexer) emit(t tokenType) {
+func (l *lexer) emit(t tokenType) lexResult {
 	l.tokens <- token{t, l.start, l.input[l.start:l.pos], l.line}
 
 	l.drop()
+	return lexOk
 }
 
-func (l *lexer) emitTrimmed(t tokenType) {
+func (l *lexer) emitTrimmed(t tokenType) lexResult {
 	trimmed := strings.Trim(l.input[l.start:l.pos], " \t\r\n")
 	l.tokens <- token{t, l.start, trimmed, l.line}
 
 	l.drop()
+	return lexOk
 }
 
 // drop skips eaten runes
 func (l *lexer) drop() {
 	// l.line += strings.Count(l.input[l.start:l.pos], "\n")
 	l.start = l.pos
-}
-
-// rollback reset pos to start position
-func (l *lexer) rollback() {
-	l.pos = l.start
 }
 
 func (l *lexer) eatIdentifier() string {
@@ -209,10 +221,42 @@ func (l *lexer) eatUntil(stopMasks []string) bool {
 	return false
 }
 
-func (l *lexer) eatAnyOf(chars string) {
+func (l *lexer) eatAnyOf(chars string) string {
+	start := l.pos
 	for strings.ContainsRune(chars, l.next()) {
 	}
 	l.backup()
+
+	return l.input[start:l.pos]
+}
+
+func (l *lexer) _lexComments(drop bool) {
+	l.eatAnyOf(hSpace)
+	r := l.next()
+	if r == '#' {
+		l.drop()
+		for r != '\n' && r != eof {
+			r = l.next()
+		}
+		l.backup()
+		if drop {
+			l.drop()
+		} else {
+			l.emitTrimmed(tokenComment)
+		}
+		return
+	}
+	l.backup()
+	l.drop()
+}
+
+func lexComments(l *lexer) lexResult {
+	l._lexComments(false)
+	return lexPass
+}
+
+func (l *lexer) dropComments() {
+	l._lexComments(true)
 }
 
 func (l *lexer) eatVarPrefix() rune {
@@ -246,6 +290,23 @@ func (l *lexer) eat(s string) bool {
 func (l *lexer) eatTokenWord(m map[string]tokenType) (tokenType, bool) {
 	start, line := l.readState()
 	id := l.eatIdentifier()
+	tok, ok := m[id]
+	if !ok {
+		l.setReadState(start, line)
+		return tokenError, false
+	}
+	return tok, true
+}
+
+func (l *lexer) eatOneOfTokenWord(keywords []string, m map[string]tokenType) (tokenType, bool) {
+	start, line := l.readState()
+	id := l.eatIdentifier()
+
+	if funk.IndexOfString(keywords, id) == -1 {
+		l.setReadState(start, line)
+		return tokenError, false
+	}
+
 	tok, ok := m[id]
 	if !ok {
 		l.setReadState(start, line)
@@ -312,6 +373,10 @@ out:
 				continue out
 			case lexError:
 				return lexError
+			default:
+				if lexRes > lexBreakStart {
+					return lexRes
+				}
 			}
 		}
 		// ok, we are failed eat something more, stopping
@@ -323,7 +388,7 @@ out:
 
 // run runs the state machine for the lexer.
 func (l *lexer) run() {
-	for state := lexInitial; state != nil; {
+	for state := stateInitial; state != nil; {
 		l.currentStator = state
 		state = state(l)
 	}
@@ -337,6 +402,14 @@ func (l *lexer) errorf(message string, args ...interface{}) lexResult {
 
 // ---- lexer functions
 
+func lexColon(l *lexer) lexResult {
+	r := l.next()
+	if r != ':' {
+		return l.backup()
+	}
+	return l.emit(tokenColon)
+}
+
 func lexMacro(l *lexer) lexResult {
 	r := l.next()
 	if r != '!' {
@@ -347,8 +420,14 @@ func lexMacro(l *lexer) lexResult {
 	if len(l.eatIdentifier()) == 0 {
 		return l.errorf("Expected any valid identifier after ! symbol")
 	}
-	l.emit(tokenMacro)
-	return lexOk
+	return l.emit(tokenMacro)
+}
+
+func lexIdentifier(l *lexer) lexResult {
+	if len(l.eatIdentifier()) == 0 {
+		return lexPass
+	}
+	return l.emit(tokenIdentifier)
 }
 
 func lexQuotedString(l *lexer) lexResult {
@@ -421,8 +500,7 @@ func lexPathPattern(l *lexer) lexResult {
 	}
 	l.backup()
 	if l.pos > start {
-		l.emit(tokenPathPattern)
-		return lexOk
+		return l.emit(tokenPathPattern)
 	}
 	return lexPass
 }
@@ -435,27 +513,26 @@ func lexPipe(l *lexer) lexResult {
 		return l.backup()
 	}
 	if l.next() == '>' {
-		l.emit(tokenPipe)
-		return lexOk
-	} else {
-		l.setReadState(start, line)
-		return lexPass
+		return l.emit(tokenPipe)
 	}
+
+	l.setReadState(start, line)
+	return lexPass
 }
 
-func lexKeyword(l *lexer) lexResult {
-	if keywordToken, ok := l.eatTokenWord(keywords); ok {
-		l.emit(keywordToken)
-		return lexOk
+func lexOneKeywordOf(kws []string) lexerFn {
+	return func(l *lexer) lexResult {
+		if keywordToken, ok := l.eatOneOfTokenWord(kws, keywords); ok {
+			return l.emit(keywordToken)
+		}
+		return lexPass
 	}
-	return lexPass
 }
 
 func lexStringUntil(stopStrings []string) lexerFn {
 	return func(l *lexer) lexResult {
 		if l.eatUntil(stopStrings) {
-			l.emitTrimmed(tokenString)
-			return lexOk
+			return l.emitTrimmed(tokenString)
 		}
 		return lexPass
 	}
@@ -469,8 +546,7 @@ func lexPercentFlag(l *lexer) lexResult {
 	l.drop()
 	r = l.next()
 	if isValidFlag(r) {
-		l.emit(tokenPercentFlag)
-		return lexOk
+		return l.emit(tokenPercentFlag)
 	}
 	return l.errorf("invalid flag %v", r)
 }
@@ -491,66 +567,230 @@ var commandLexers = []lexerFn{
 	lexStringUntil([]string{"|>", "\n", " ", "\t"}),
 }
 
-// ---- state (parsing) funnctions ----
-
-func lexRuleDest(l *lexer) stateFn {
-	l.lex([]lexerFn{lexPathPattern})
-	return lexInitial
+func lexRuleDest(l *lexer) lexResult {
+	return l.lex([]lexerFn{lexPathPattern})
 }
 
-func lexRuleCommand(l *lexer) stateFn {
+func lexRuleCommand(l *lexer) lexResult {
 	l.lex(commandLexers)
 
 	if lexPipe(l) != lexOk {
-		l.errorf("Expected |>")
-		return nil
+		return l.errorf("Expected |>")
 	}
-	return lexRuleDest
+	lexRuleDest(l)
+	return lexOk
 }
 
-func lexRule(l *lexer) stateFn {
+var lexForeach = lexOneKeywordOf([]string{"foreach"})
+
+func lexRuleHead(l *lexer) lexResult {
 	// foreach src/commin.css $(foo) |> cat %f | node_modules/.bin/csso -o %o |> dest.css
-	lexKeyword(l)
+	// @TODO: optimize
+	lexForeach(l)
+
 	l.lex(inputPatternLexers)
 
 	r := l.peek()
 	if r == '\n' || r == eof {
-		return lexInitial
+		return lexOk
 	}
 
 	if lexPipe(l) != lexOk {
-		l.errorf("Rule definition: expected |>, got %v", r)
-		return nil
+		return l.errorf("Rule definition: expected '|>', got '%v'", r)
 	}
 
-	return lexRuleCommand
+	lexRuleCommand(l)
+	return lexOk
 }
 
-func lexMacroDef(l *lexer) stateFn {
+func lexMacroDef(l *lexer) lexResult {
 	// !macro_name =
-	lexMacro(l)
+	if lexMacro(l) != lexOk {
+		return lexPass
+	}
 	l.eatAnyOf(hSpace)
 	l.drop()
 	if l.next() != '=' {
-		l.errorf("expected '='")
-		return nil
+		return l.errorf("expected '='")
 	}
 	l.emit(tokenAssign)
 
 	l.eatAnyOf(hSpace)
 	l.drop()
 
-	return lexRule
+	lexRuleHead(l)
+	return lexOk
 }
 
-func lexInitial(l *lexer) stateFn {
-	l.eatAnyOf(hSpace + vSpace)
+func lexRuleDef(l *lexer) lexResult {
+	if lexColon(l) != lexOk {
+		return lexPass
+	}
+	l.eatAnyOf(hSpace)
 	l.drop()
-	r := l.peek()
-	if r == '!' {
-		// macro definition
-		return lexMacroDef
+
+	lexRuleHead(l)
+	return lexOk
+}
+
+func eatSpaces(l *lexer) lexResult {
+	var start Pos
+	for {
+		start = l.pos
+		l.eatAnyOf(vSpace)
+		lexComments(l)
+		if start == l.pos {
+			break
+		}
 	}
 
+	return lexPass
+}
+
+var ifExpLexers = []lexerFn{
+	lexVariable,
+	lexQuotedString,
+	lexIdentifier,
+}
+
+func lexIfeq(l *lexer) lexResult {
+	l.eatAnyOf(hSpace)
+	l.drop()
+	r := l.next()
+	if r != '(' {
+		return l.errorf("ifeq: expected '(', got '%v'", r)
+	}
+	if l.lex(ifExpLexers) == lexPass {
+		return l.errorf("ifeq: empty left expression, put variable, quoted string or identifier")
+	}
+	l.eatAnyOf(hSpace)
+	l.drop()
+
+	r = l.next()
+	if r != ',' {
+		return l.errorf("ifeq: expected ',', got '%v'", r)
+	}
+	l.emit(tokenComma)
+	if l.lex(ifExpLexers) == lexPass {
+		return l.errorf("ifeq: empty right expression, put variable, quoted string or identifier")
+	}
+
+	l.eatAnyOf(hSpace)
+	l.drop()
+	r = l.next()
+	if r != ')' {
+		return l.errorf("ifeq: expected ')', got '%v'", r)
+	}
+	l.dropComments()
+
+	return lexOk
+}
+
+// =,+=
+// used after top level identifier
+func lexOperators(l *lexer) lexResult {
+	pos, line := l.readState()
+	r := l.next()
+	switch r {
+	case '=':
+		return l.emit(tokenAssign)
+	case '+':
+		if l.next() == '=' {
+			return l.emit(tokenPlusAssign)
+		}
+	default:
+		return lexPass
+	}
+	l.setReadState(pos, line)
+	return lexPass
+}
+
+var labelDepsLexers = []lexerFn{
+	lexIdentifier,
+}
+
+func lexLabelDeps(l *lexer) lexResult {
+	l.lex(labelDepsLexers)
+	r := l.next()
+	if r != '\n' {
+		return l.errorf("Label declaration: expected new line, got '%v'", r)
+	}
+	l.drop()
+	return lexOk
+}
+
+func lexTopLevelIdentifier(l *lexer) lexResult {
+	id := l.eatIdentifier()
+	if len(id) == 0 {
+		return lexPass
+	}
+
+	// check if read identifier is keyword
+	if keywordToken, kwOk := keywords[id]; kwOk {
+		l.emit(keywordToken)
+		switch keywordToken {
+		case tokenKeywordIfeq:
+			return lexIfeq(l)
+		}
+		return lexOk
+	}
+
+	// check if read identifier is label
+	r := l.next()
+	if r == ':' {
+		l.pos--
+		l.emit(tokenLabel)
+		l.pos++
+		l.start = l.pos
+		if lexLabelDeps(l) == lexError {
+			return lexError
+		}
+		return lexBreakLabelBody
+	}
+	l.backup()
+
+	// otherwise probably our identifier is variable
+	l.emit(tokenIdentifier)
+
+	return lexOk
+}
+
+var topLevelLexers = []lexerFn{
+	eatSpaces,
+	lexMacroDef,
+	lexRuleDef,
+	lexTopLevelIdentifier,
+}
+
+func stateCodeBlock(l *lexer) stateFn {
+	// TODO
+	return stateInitial
+}
+
+func stateLabelBody(l *lexer) stateFn {
+	r := l.next()
+	if r == ':' {
+		l.backup()
+		// ok, it was label for rules
+		return stateInitial
+	}
+	// for code blocks I want at least two spaces
+	if r == ' ' {
+		afterSpace := l.next()
+		if afterSpace == ' ' {
+			return stateCodeBlock
+		}
+		l.errorf("Expected at least two spaces for code blocks, got '%v' instead.", afterSpace)
+		return nil
+	}
+	l.errorf("Unexpected symbol '%v' after label declaration. Expected code block or :-rule.", r)
+	return nil
+}
+
+func stateInitial(l *lexer) stateFn {
+	lexRes := l.lex(topLevelLexers)
+	if lexRes == lexBreakLabelBody {
+		return stateLabelBody
+	}
 	return nil
 }

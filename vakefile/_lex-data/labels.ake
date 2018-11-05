@@ -1,0 +1,3 @@
+
+js: tup
+: src/*.css |> !b |> out.css

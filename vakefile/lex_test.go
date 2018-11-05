@@ -1,16 +1,60 @@
 package vakefile
 
 import (
+	"io/ioutil"
 	"testing"
 )
 
 type tokens []token
+
+var fileTestCases = map[string]tokens{
+	"lex-if": []token{
+		token{val: "include_rules", typ: tokenKeywordIncludeRules},
+		token{val: "ifeq", typ: tokenKeywordIfeq},
+		token{val: "NODE_ENV", typ: tokenVariable},
+		token{val: ",", typ: tokenComma},
+		token{val: "development", typ: tokenIdentifier},
+		token{val: "bundle_js", typ: tokenMacro},
+		token{val: "=", typ: tokenAssign},
+		token{val: "|>", typ: tokenPipe},
+		token{val: "cat", typ: tokenString},
+		token{val: "f", typ: tokenPercentFlag},
+		token{val: "|>", typ: tokenPipe},
+		token{val: "endif", typ: tokenKeywordEndif},
+	},
+	"rule-comment": []token{
+		token{val: "bundles css", typ: tokenComment},
+		token{val: ":", typ: tokenColon},
+		token{val: "src/*.css", typ: tokenPathPattern},
+		token{val: "|>", typ: tokenPipe},
+		token{val: "b", typ: tokenMacro},
+		token{val: "|>", typ: tokenPipe},
+		token{val: "out.css", typ: tokenPathPattern},
+	},
+	"labels": []token{
+		token{val: "js", typ: tokenLabel},
+		token{val: "tup", typ: tokenIdentifier},
+		token{val: ":", typ: tokenColon},
+		token{val: "src/*.css", typ: tokenPathPattern},
+		token{val: "|>", typ: tokenPipe},
+		token{val: "b", typ: tokenMacro},
+		token{val: "|>", typ: tokenPipe},
+		token{val: "out.css", typ: tokenPathPattern},
+		// token{val: "tup", typ: tokenLabel},
+	},
+}
 
 var testCases = map[string]tokens{
 	"!bundle_css = foreach": []token{
 		token{val: "bundle_css", typ: tokenMacro},
 		token{val: "=", typ: tokenAssign},
 		token{val: "foreach", typ: tokenKeywordForeach},
+	},
+	"!bundle_css = foreach\ninclude_rules": []token{
+		token{val: "bundle_css", typ: tokenMacro},
+		token{val: "=", typ: tokenAssign},
+		token{val: "foreach", typ: tokenKeywordForeach},
+		token{val: "include_rules", typ: tokenKeywordIncludeRules},
 	},
 	"!foo = foreach\n!boo = |> !foo |>": []token{
 		token{val: "foo", typ: tokenMacro},
@@ -57,23 +101,46 @@ var testCases = map[string]tokens{
 		token{val: "o", typ: tokenPercentFlag},
 		token{val: "|>", typ: tokenPipe},
 	},
+	": foreach src/*.css |> !bundle_css |> static/%b": []token{
+		token{val: ":", typ: tokenColon},
+		token{val: "foreach", typ: tokenKeywordForeach},
+		token{val: "src/*.css", typ: tokenPathPattern},
+		token{val: "|>", typ: tokenPipe},
+		token{val: "bundle_css", typ: tokenMacro},
+		token{val: "|>", typ: tokenPipe},
+		token{val: "static/%b", typ: tokenPathPattern},
+	},
+}
+
+func doTestLex(t *testing.T, filename, source string, tokens []token) {
+	l := lex(filename, source)
+	i := 0
+	for token := range l.tokens {
+		if i >= len(tokens) {
+			t.Fatalf("[%s], there are more tokens when expected, extra token: %s", filename, token)
+		}
+		if token.typ != tokens[i].typ || token.val != tokens[i].val {
+			t.Errorf("[%s] error, expected: ('%s', %v), got: ('%s', %v)", filename, tokens[i].val, tokens[i].typ, token.val, token.typ)
+		}
+		i++
+	}
+	if i < len(tokens) {
+		t.Errorf("[%s], there are less tokens when expected, needed token: %s", filename, tokens[i])
+	}
 }
 
 func TestCases(t *testing.T) {
 	for source, tokens := range testCases {
-		l := lex("testCase", source)
-		i := 0
-		for token := range l.tokens {
-			if i >= len(tokens) {
-				t.Fatalf("[%s], there are more tokens when expected, extra token: %s", source, token)
-			}
-			if token.typ != tokens[i].typ || token.val != tokens[i].val {
-				t.Errorf("[%s] error, expected: ('%s', %v), got: ('%s', %v)", source, tokens[i].val, tokens[i].typ, token.val, token.typ)
-			}
-			i++
+		doTestLex(t, source, source, tokens)
+	}
+}
+
+func TestFileCases(t *testing.T) {
+	for filename, tokens := range fileTestCases {
+		content, err := ioutil.ReadFile("_lex-data/" + filename + ".ake")
+		if err != nil {
+			t.Fatal(err)
 		}
-		if i < len(tokens) {
-			t.Errorf("[%s], there are less tokens when expected, needed token: %s", source, tokens[i])
-		}
+		doTestLex(t, filename, string(content), tokens)
 	}
 }
