@@ -103,17 +103,15 @@ type lexer struct {
 	input string // the string being scanned
 
 	// read state
-	start     Pos  // start position of this item
-	width     Pos  // width of last rune read from input
-	nl        int  // 1 if read rune == '\n' otherwise 0
-	lastRune  rune //
-	wasBackup bool
+	width    Pos  // width of last rune read from input
+	nl       int  // 1 if read rune == '\n' otherwise 0
+	lastRune rune //
 
 	// processing state
-	pos           Pos       // current position in the input
-	line          int       // 1+number of newlines seen
-	stators       []stateFn // stack of state fns, lets call it stator
-	currentStator stateFn
+	start     Pos // start position of this item
+	pos       Pos // current position in the input
+	line      int // 1+number of newlines seen
+	wasBackup bool
 
 	// result stream
 	tokens chan token // channel of scanned items
@@ -269,35 +267,6 @@ func (l *lexer) eatVarPrefix() rune {
 	return 0
 }
 
-// i want to eat string which exactly equals to passed one
-// it rollbacks if eating was unsuccessful
-func (l *lexer) eat(s string) bool {
-	start, line := l.readState()
-	r := l.next()
-	for i := 0; i < len(s); {
-		stringRune, size := utf8.DecodeRuneInString(s[i:])
-		i += size
-		if r != stringRune {
-			l.setReadState(start, line)
-			return false
-		}
-		r = l.next()
-	}
-	l.backup()
-	return true
-}
-
-func (l *lexer) eatTokenWord(m map[string]tokenType) (tokenType, bool) {
-	start, line := l.readState()
-	id := l.eatIdentifier()
-	tok, ok := m[id]
-	if !ok {
-		l.setReadState(start, line)
-		return tokenError, false
-	}
-	return tok, true
-}
-
 func (l *lexer) eatOneOfTokenWord(keywords []string, m map[string]tokenType) (tokenType, bool) {
 	start, line := l.readState()
 	id := l.eatIdentifier()
@@ -339,21 +308,6 @@ func lex(name, input string) *lexer {
 	return l
 }
 
-func (l *lexer) pushCurrent(f stateFn) stateFn {
-	l.stators = append(l.stators, l.currentStator)
-	return f
-}
-
-// pop top stator form stators stack
-func (l *lexer) popState() stateFn {
-	if len(l.stators) > 0 {
-		lastStator := l.stators[len(l.stators)-1]
-		l.stators = l.stators[:len(l.stators)-1]
-		return lastStator
-	}
-	return l.currentStator
-}
-
 // eat tokens by priority list while we can
 func (l *lexer) lex(lexers []lexerFn) lexResult {
 	overallLexRes := lexPass
@@ -389,7 +343,6 @@ out:
 // run runs the state machine for the lexer.
 func (l *lexer) run() {
 	for state := stateInitial; state != nil; {
-		l.currentStator = state
 		state = state(l)
 	}
 	close(l.tokens)
