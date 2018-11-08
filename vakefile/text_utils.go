@@ -1,6 +1,7 @@
 package vakefile
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
 )
@@ -36,4 +37,11 @@ func isValidFlag(r rune) bool {
 		return false
 	}
 	return strings.ContainsRune(validFlags, r)
+}
+
+func textTrim(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return fmt.Sprintf("%s..", s[:maxLen])
 }

@@ -17,8 +17,7 @@ var fileTestCases = map[string]tokens{
 		token{val: "bundle_js", typ: tokenMacro},
 		token{val: "=", typ: tokenAssign},
 		token{val: "|>", typ: tokenPipe},
-		token{val: "cat", typ: tokenString},
-		token{val: "f", typ: tokenPercentFlag},
+		token{val: "cat %f", typ: tokenString},
 		token{val: "|>", typ: tokenPipe},
 		token{val: "endif", typ: tokenKeywordEndif},
 	},
@@ -71,9 +70,10 @@ var testCases = map[string]tokens{
 		token{val: "=", typ: tokenAssign},
 		token{val: "a.js", typ: tokenPathPattern},
 		token{val: "|>", typ: tokenPipe},
-		token{val: "echo", typ: tokenString},
+		token{val: "echo ", typ: tokenString},
 		token{val: "xv", typ: tokenVariable},
-		token{val: "|>", typ: tokenQuotedString},
+		token{val: " ", typ: tokenString},
+		token{val: "\"|>\"", typ: tokenQuotedString},
 		token{val: "|>", typ: tokenPipe},
 	},
 	"!foo = foreach src/*.css |> cat %f > %o |> dist/bundle.css": []token{
@@ -82,10 +82,7 @@ var testCases = map[string]tokens{
 		token{val: "foreach", typ: tokenKeywordForeach},
 		token{val: "src/*.css", typ: tokenPathPattern},
 		token{val: "|>", typ: tokenPipe},
-		token{val: "cat", typ: tokenString},
-		token{val: "f", typ: tokenPercentFlag},
-		token{val: ">", typ: tokenString},
-		token{val: "o", typ: tokenPercentFlag},
+		token{val: "cat %f > %o", typ: tokenString},
 		token{val: "|>", typ: tokenPipe},
 		token{val: "dist/bundle.css", typ: tokenPathPattern},
 	},
@@ -95,10 +92,7 @@ var testCases = map[string]tokens{
 		token{val: "foreach", typ: tokenKeywordForeach},
 		token{val: "src/*.css", typ: tokenPathPattern},
 		token{val: "|>", typ: tokenPipe},
-		token{val: "cat", typ: tokenString},
-		token{val: "f", typ: tokenPercentFlag},
-		token{val: ">", typ: tokenString},
-		token{val: "o", typ: tokenPercentFlag},
+		token{val: "cat %f > %o", typ: tokenString},
 		token{val: "|>", typ: tokenPipe},
 	},
 	": foreach src/*.css |> !bundle_css |> static/%b": []token{
@@ -115,12 +109,22 @@ var testCases = map[string]tokens{
 func doTestLex(t *testing.T, filename, source string, tokens []token) {
 	l := lex(filename, source)
 	i := 0
+	recvTokens := []token{}
 	for token := range l.tokens {
-		if i >= len(tokens) {
-			t.Fatalf("[%s], there are more tokens when expected, extra token: %s", filename, token)
-		}
-		if token.typ != tokens[i].typ || token.val != tokens[i].val {
-			t.Errorf("[%s] error, expected: ('%s', %v), got: ('%s', %v)", filename, tokens[i].val, tokens[i].typ, token.val, token.typ)
+		recvTokens = append(recvTokens, token)
+		if i > len(tokens) {
+			t.Errorf("[%s], there are more tokens when expected, extra token: %s", filename, token)
+			t.Logf("recv. tokens: %v", recvTokens)
+			break
+		} else if i == len(tokens) {
+			// last one should be EOF
+			if token.typ != tokenEOF {
+				t.Errorf("[%s], expected EOF token, got ('%s', %v)\nrecv. tokens: %v", filename, token.val, token.typ, recvTokens)
+			}
+		} else {
+			if token.typ != tokens[i].typ || token.val != tokens[i].val {
+				t.Errorf("[%s] error, expected: [%d]('%s', %v), got: ('%s', %v)\n\nrecv. tokens: %v", filename, i, tokens[i].val, tokens[i].typ, token.val, token.typ, recvTokens)
+			}
 		}
 		i++
 	}

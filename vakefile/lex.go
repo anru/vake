@@ -53,7 +53,6 @@ const (
 	tokenShebang
 	tokenPathPattern
 	tokenQuotedString
-	tokenPercentFlag
 	tokenLabel
 	tokenIdentifier
 )
@@ -83,11 +82,11 @@ func (t token) String() string {
 	case t.typ == tokenEOF:
 		return "!EOF"
 	case t.typ == tokenError:
-		return fmt.Sprintf("[Error]: %s", t.val)
+		return fmt.Sprintf("[Error]: '%s'", t.val)
 	case len(t.val) > 10:
-		return fmt.Sprintf("%s...", t.val[:10])
+		return fmt.Sprintf("(%d, '%s...')", t.typ, t.val[:10])
 	}
-	return fmt.Sprintf("%s", t.val)
+	return fmt.Sprintf("(%d, '%s')", t.typ, t.val)
 }
 
 // lexerFn represens algo which can parse defined lexem
@@ -108,13 +107,16 @@ type lexer struct {
 	lastRune rune //
 
 	// processing state
-	start     Pos // start position of this item
+	start     Pos // start position of this token
 	pos       Pos // current position in the input
 	line      int // 1+number of newlines seen
 	wasBackup bool
 
 	// result stream
-	tokens chan token // channel of scanned items
+	tokens           chan token // channel of scanned tokens
+	isBuffering      int
+	tokensBuffer     []token
+	lastEmittedToken tokenType
 }
 
 func (l *lexer) readState() (Pos, int) {
@@ -122,6 +124,7 @@ func (l *lexer) readState() (Pos, int) {
 }
 
 func (l *lexer) setReadState(pos Pos, line int) {
+	l.wasBackup = false
 	l.pos = pos
 	l.line = line
 }
@@ -159,7 +162,6 @@ func (l *lexer) peek() rune {
 	return r
 }
 
-// backup steps back one rune. Can only be called once per call of next.
 func (l *lexer) backup() lexResult {
 	if l.wasBackup {
 		panic("twice backup")
@@ -170,25 +172,44 @@ func (l *lexer) backup() lexResult {
 	return lexPass
 }
 
-// emit passes an item back to the client.
-func (l *lexer) emit(t tokenType) lexResult {
-	l.tokens <- token{t, l.start, l.input[l.start:l.pos], l.line}
+func (l *lexer) emitString(t tokenType, str string) lexResult {
+	tok := token{t, l.start, str, l.line}
+	if l.isBuffering != 0 {
+		l.tokensBuffer = append(l.tokensBuffer, tok)
+	} else {
+		l.lastEmittedToken = t
+		l.tokens <- tok
+	}
 
-	l.drop()
 	return lexOk
 }
 
-func (l *lexer) emitTrimmed(t tokenType) lexResult {
-	trimmed := strings.Trim(l.input[l.start:l.pos], " \t\r\n")
-	l.tokens <- token{t, l.start, trimmed, l.line}
+func (l *lexer) emit(t tokenType) lexResult {
+	return l.emitString(t, l.input[l.start:l.pos])
+}
 
-	l.drop()
-	return lexOk
+func (l *lexer) emitTrimmed(t tokenType) lexResult {
+	return l.emitString(t, strings.Trim(l.input[l.start:l.pos], " \t\r\n"))
+}
+
+func (l *lexer) bufferEmits(doBuffering bool) {
+	if doBuffering {
+		l.isBuffering++
+	} else if l.isBuffering > 0 {
+		l.isBuffering--
+	}
+}
+
+func (l *lexer) flushBuffer() {
+	for _, tok := range l.tokensBuffer {
+		l.lastEmittedToken = tok.typ
+		l.tokens <- tok
+	}
+	l.tokensBuffer = []token{}
 }
 
 // drop skips eaten runes
 func (l *lexer) drop() {
-	// l.line += strings.Count(l.input[l.start:l.pos], "\n")
 	l.start = l.pos
 }
 
@@ -308,13 +329,65 @@ func lex(name, input string) *lexer {
 	return l
 }
 
-// eat tokens by priority list while we can
+func (l *lexer) lexUntil(lexers, stopLexers []lexerFn, restToken tokenType) lexResult {
+	var overallLexRes = lexPass
+	startRestPos := l.pos
+	var endResPos Pos = -1
+	for {
+		startAt := l.pos
+		l.bufferEmits(true)
+		lexRes := l.lexws(lexers, false)
+		if lexRes != lexPass && overallLexRes != lexError {
+			overallLexRes = lexRes
+		}
+
+		stopLexRes := l.lexws(stopLexers, false)
+
+		l.bufferEmits(false)
+
+		// if we read something
+		if l.pos > startAt {
+			if endResPos > startRestPos {
+				l.emitString(restToken, l.input[startRestPos:endResPos])
+				endResPos = -1
+			}
+		} else {
+			if endResPos != l.pos {
+				startRestPos = l.pos
+			}
+			r := l.next()
+			if r == eof {
+				if l.pos > startRestPos {
+					l.emitString(restToken, l.input[startRestPos:l.pos])
+				}
+				l.flushBuffer()
+				return overallLexRes
+			}
+			l.drop()
+			endResPos = l.pos
+		}
+		l.flushBuffer()
+
+		if stopLexRes == lexOk {
+			return overallLexRes
+		}
+	}
+}
+
 func (l *lexer) lex(lexers []lexerFn) lexResult {
+	return l.lexws(lexers, true)
+}
+
+// eat tokens by priority list while we can
+func (l *lexer) lexws(lexers []lexerFn, eaths bool) lexResult {
 	overallLexRes := lexPass
 out:
 	for {
-		l.eatAnyOf(hSpace)
-		l.drop()
+		if eaths {
+			l.eatAnyOf(hSpace)
+			l.drop()
+		}
+
 		if l.peek() == eof {
 			return overallLexRes
 		}
@@ -384,14 +457,14 @@ func lexIdentifier(l *lexer) lexResult {
 }
 
 func lexQuotedString(l *lexer) lexResult {
+	start := l.pos
 	openRune := l.next()
 	if openRune == '"' {
-		l.drop()
 		wasEscapeSymbol := false
 		for {
 			r := l.next()
 			if r == eof || r == '\n' {
-				return l.errorf("unterminated string literal %s", l.input[l.start:l.pos])
+				return l.errorf("unterminated string literal %s", l.input[start:l.pos])
 			}
 			if wasEscapeSymbol {
 				wasEscapeSymbol = false
@@ -406,12 +479,7 @@ func lexQuotedString(l *lexer) lexResult {
 			}
 		}
 
-		l.pos--
-		l.emit(tokenQuotedString)
-		l.pos++
-		l.drop()
-
-		return lexOk
+		return l.emit(tokenQuotedString)
 	}
 	return l.backup()
 }
@@ -473,6 +541,17 @@ func lexPipe(l *lexer) lexResult {
 	return lexPass
 }
 
+func lexWsPipe(l *lexer) lexResult {
+	start, line := l.readState()
+	l.eatAnyOf(hSpace)
+	l.drop()
+	lr := lexPipe(l)
+	if lr == lexPass {
+		l.setReadState(start, line)
+	}
+	return lr
+}
+
 func lexOneKeywordOf(kws []string) lexerFn {
 	return func(l *lexer) lexResult {
 		if keywordToken, ok := l.eatOneOfTokenWord(kws, keywords); ok {
@@ -491,19 +570,6 @@ func lexStringUntil(stopStrings []string) lexerFn {
 	}
 }
 
-func lexPercentFlag(l *lexer) lexResult {
-	r := l.next()
-	if r != '%' {
-		return l.backup()
-	}
-	l.drop()
-	r = l.next()
-	if isValidFlag(r) {
-		return l.emit(tokenPercentFlag)
-	}
-	return l.errorf("invalid flag %v", r)
-}
-
 // example: "foo/bar" $(foo) src/commin/*.css
 var inputPatternLexers = []lexerFn{
 	lexQuotedString,
@@ -516,8 +582,10 @@ var commandLexers = []lexerFn{
 	lexQuotedString,
 	lexVariable,
 	lexMacro,
-	lexPercentFlag,
-	lexStringUntil([]string{"|>", "\n", " ", "\t"}),
+}
+
+var commandStopLexers = []lexerFn{
+	lexWsPipe,
 }
 
 func lexRuleDest(l *lexer) lexResult {
@@ -525,9 +593,11 @@ func lexRuleDest(l *lexer) lexResult {
 }
 
 func lexRuleCommand(l *lexer) lexResult {
-	l.lex(commandLexers)
+	l.eatAnyOf(hSpace)
+	l.drop()
+	l.lexUntil(commandLexers, commandStopLexers, tokenString)
 
-	if lexPipe(l) != lexOk {
+	if l.lastEmittedToken != tokenPipe {
 		return l.errorf("Expected |>")
 	}
 	lexRuleDest(l)
@@ -694,7 +764,7 @@ func lexTopLevelIdentifier(l *lexer) lexResult {
 		l.pos--
 		l.emit(tokenLabel)
 		l.pos++
-		l.start = l.pos
+		l.drop()
 		if lexLabelDeps(l) == lexError {
 			return lexError
 		}
@@ -744,6 +814,12 @@ func stateInitial(l *lexer) stateFn {
 	lexRes := l.lex(topLevelLexers)
 	if lexRes == lexBreakLabelBody {
 		return stateLabelBody
+	}
+	if l.pos == Pos(len(l.input)) {
+		l.width = 0
+		l.emit(tokenEOF)
+	} else {
+		l.errorf("Unparsed statements %s", textTrim(string(l.input[l.pos]), 25))
 	}
 	return nil
 }
