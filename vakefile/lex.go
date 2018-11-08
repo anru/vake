@@ -221,25 +221,6 @@ func (l *lexer) eatIdentifier() string {
 	return l.input[start:l.pos]
 }
 
-func (l *lexer) eatUntil(stopMasks []string) bool {
-	start := l.pos
-	for r := l.next(); true; r = l.next() {
-		if r == eof {
-			return l.pos > start
-		}
-		for _, stopMask := range stopMasks {
-			if strings.HasSuffix(l.input[start:l.pos], stopMask) {
-				// rollback for length of stopMask
-				endPos := l.pos
-				l.pos -= Pos(len(stopMask))
-				l.line -= strings.Count(l.input[l.pos:endPos], "\n")
-				return l.pos > start
-			}
-		}
-	}
-	return false
-}
-
 func (l *lexer) eatAnyOf(chars string) string {
 	start := l.pos
 	for strings.ContainsRune(chars, l.next()) {
@@ -556,15 +537,6 @@ func lexOneKeywordOf(kws []string) lexerFn {
 	return func(l *lexer) lexResult {
 		if keywordToken, ok := l.eatOneOfTokenWord(kws, keywords); ok {
 			return l.emit(keywordToken)
-		}
-		return lexPass
-	}
-}
-
-func lexStringUntil(stopStrings []string) lexerFn {
-	return func(l *lexer) lexResult {
-		if l.eatUntil(stopStrings) {
-			return l.emitTrimmed(tokenString)
 		}
 		return lexPass
 	}
