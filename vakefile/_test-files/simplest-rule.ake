@@ -1,0 +1,1 @@
+:src/*.js |> cat %f > %o |> app.js

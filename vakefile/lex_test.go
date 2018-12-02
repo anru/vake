@@ -141,7 +141,7 @@ func TestCases(t *testing.T) {
 
 func TestFileCases(t *testing.T) {
 	for filename, tokens := range fileTestCases {
-		content, err := ioutil.ReadFile("_lex-data/" + filename + ".ake")
+		content, err := ioutil.ReadFile("_test-files/" + filename + ".ake")
 		if err != nil {
 			t.Fatal(err)
 		}

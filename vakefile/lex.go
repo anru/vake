@@ -290,12 +290,9 @@ func (l *lexer) nextToken() token {
 	return <-l.tokens
 }
 
-func (l *lexer) drain() []token {
-	var tokens []token
-	for token := range l.tokens {
-		tokens = append(tokens, token)
+func (l *lexer) drain() {
+	for range l.tokens {
 	}
-	return tokens
 }
 
 // lex creates a new scanner for the input string.
@@ -360,11 +357,11 @@ func (l *lexer) lex(lexers []lexerFn) lexResult {
 }
 
 // eat tokens by priority list while we can
-func (l *lexer) lexws(lexers []lexerFn, eaths bool) lexResult {
+func (l *lexer) lexws(lexers []lexerFn, eatws bool) lexResult {
 	overallLexRes := lexPass
 out:
 	for {
-		if eaths {
+		if eatws {
 			l.eatAnyOf(hSpace)
 			l.drop()
 		}
