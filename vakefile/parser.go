@@ -8,7 +8,7 @@ import (
 type parseResult int
 
 const (
-	parseError = iota
+	parseError parseResult = iota
 	parseOk
 	parsePass
 )
@@ -43,6 +43,8 @@ type Parser struct {
 	nodes chan Node
 	errc  chan error
 }
+
+type parseFn func(*Parser) parseResult
 
 type parserStateFn func(*Parser) parserStateFn
 
@@ -144,6 +146,33 @@ func (p *Parser) expect(typ tokenType) *token {
 	return t
 }
 
+func (p *Parser) parseBy(parsers []parseFn) parseResult {
+	overallParseRes := parsePass
+
+out:
+	for {
+		if p.peek().typ == tokenEOF {
+			return overallParseRes
+		}
+
+		for _, parseFn := range parsers {
+			parseRes := parseFn(p)
+			switch parseRes {
+			case parseOk:
+				overallParseRes = parseOk
+				continue out
+			case parseError:
+				return parseError
+			}
+		}
+
+		// ok, we are failed eat something more, stopping
+		break
+	}
+
+	return overallParseRes
+}
+
 // :src/*.js |> !bundle_js |> app/bundle.js
 // :foreach src/*.js |> !bundle_js |> app/%b
 func parseRule(p *Parser) parseResult {
@@ -219,8 +248,12 @@ CommandLoop:
 	return parsePass
 }
 
+var topLevelParsers = []parseFn{
+	parseRule,
+}
+
 func parseStateInitial(p *Parser) parserStateFn {
-	parseRule(p)
+	p.parseBy(topLevelParsers)
 	return nil
 }
 
